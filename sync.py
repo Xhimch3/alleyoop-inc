@@ -3,7 +3,7 @@
 Alleyoop: automatska sinhronizacija rezultata u Supabase.
 
 Superliga e Kosovës: cita https://www.basketbolli.com/Results?leagueId=150
-Evroliga: https://api-live.euroleague.net/v1/schedules (neslužbeni javni API, bez ključa).
+Evroliga: https://api-live.euroleague.net/v1/schedules i /v1/results (neslužbeni javni API, bez ključa).
 
 Koristi se ovako:
   python sync.py                       # jedan prolaz
@@ -208,6 +208,7 @@ def sync_kosovo(args, db):
 # ---------------------------------------------------------------- Evroliga
 EL_SEASON = os.environ.get("EL_SEASON", "E2026")     # sezona 2026/27
 EL_SCHEDULE = "https://api-live.euroleague.net/v1/schedules?seasonCode=" + EL_SEASON
+EL_RESULTS = "https://api-live.euroleague.net/v1/results?seasonCode=" + EL_SEASON
 EL_TZ = ZoneInfo("Europe/Berlin")                     # satnica Evrolige je srednjoevropska
 
 # kljucna rec iz naziva u API-ju -> naziv kakav je u nasoj bazi
@@ -267,7 +268,7 @@ def parse_el_schedule(xml_text):
         hs, as_ = to_int(g.get("homescore")), to_int(g.get("awayscore"))
         out.append({
             "home": home, "away": away,
-            "round": to_int(g.get("gamenumber") or g.get("round")) or 0,
+            "round": to_int(g.get("gameday") or g.get("gamenumber") or g.get("round")) or 0,
             "starts_at": el_start(g.get("date"), g.get("startime") or g.get("time")),
             "venue": g.get("arenaname", ""), "played": played,
             "home_score": hs if played else None, "away_score": as_ if played else None,
@@ -294,6 +295,23 @@ def el_standings(games):
     return [{"league": "euroleague", "team": n, **v} for n, v in t.items()]
 
 
+def parse_el_results(xml_text):
+    """Rezultati: trazi bilo koji element koji ima hometeam, awayteam i oba rezultata."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_text)
+    out = {}
+    for el in root.iter():
+        g = {c.tag.lower(): (c.text or "").strip() for c in el if len(c) == 0}
+        if "hometeam" not in g or "awayteam" not in g:
+            continue
+        home, away = el_team(g["hometeam"]), el_team(g["awayteam"])
+        hs = to_int(g.get("homescore") or g.get("scorehome"))
+        as_ = to_int(g.get("awayscore") or g.get("scoreaway"))
+        if home and away and hs is not None and as_ is not None and hs + as_ > 0:
+            out[(home, away)] = (hs, as_)
+    return out
+
+
 def sync_euroleague(args, db):
     if args.file:                         # --file se odnosi samo na Superligu
         return
@@ -302,20 +320,34 @@ def sync_euroleague(args, db):
         print("=== EVROLIGA PROBA (prvih 1500 znakova odgovora) ===")
         print(xml_text[:1500])
     games = parse_el_schedule(xml_text)
+    try:
+        res_xml = fetch(EL_RESULTS)
+        if args.probe:
+            print("=== EVROLIGA REZULTATI PROBA (prvih 800 znakova) ===")
+            print(res_xml[:800])
+        scores = parse_el_results(res_xml)
+    except Exception as e:
+        print("UPOZORENJE: rezultati Evrolige nisu dostupni: %s" % e, file=sys.stderr)
+        scores = {}
+    print("Evroliga: pronadjeno %d rezultata" % len(scores))
+    for g in games:
+        sc = scores.get((g["home"], g["away"]))
+        g["played"] = sc is not None          # zavrsena samo ako imamo pravi rezultat
+        g["home_score"], g["away_score"] = sc if sc else (None, None)
     if len(games) < 100:
         raise RuntimeError("API Evrolige vratio %d utakmica (ocekivano oko 306). Nista nije upisano." % len(games))
     existing = norm_existing(db.get("games?league=eq.euroleague&select=*&limit=2000") if db else [])
-    by_key = {(e["home"], e["away"], e.get("round") or 0): e for e in existing}
+    by_key = {(e["home"], e["away"]): e for e in existing}
     now = datetime.now(timezone.utc)
     rows, news = [], []
     for g in games:
-        old = by_key.get((g["home"], g["away"], g["round"]))
+        old = by_key.get((g["home"], g["away"]))
         start = datetime.strptime(g["starts_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         status = "final" if g["played"] else "sched"
         if old and old["status"] == "live" and status == "sched":
             status = "live"               # urednik je rucno stavio LIVE, ne vracaj
-        if old and old["status"] == "final" and status == "sched":
-            continue
+        if old and old["status"] == "final" and status == "sched" and old.get("home_score") is not None:
+            continue                      # ne vracaj unazad pravi rezultat
         gid = old["id"] if old else "eu-%s-%s-%s" % (slug(g["home"]), slug(g["away"]), g["starts_at"][:10])
         row = {"id": gid, "league": "euroleague", "status": status, "home": g["home"], "away": g["away"],
                "home_score": g["home_score"], "away_score": g["away_score"], "starts_at": g["starts_at"],
