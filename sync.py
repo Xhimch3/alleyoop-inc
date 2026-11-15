@@ -2,7 +2,7 @@
 """
 Alleyoop: automatska sinhronizacija rezultata u Supabase.
 
-Superliga e Kosovës: cita https://www.basketbolli.com/Results?leagueId=150
+Superliga e Kosovës: cita https://www.basketbolli.com/Results?leagueId=150 i rezultate uzivo (LiveStats).
 Evroliga: https://api-live.euroleague.net/v1/schedules i /v1/results (neslužbeni javni API, bez ključa).
 
 Koristi se ovako:
@@ -142,6 +142,91 @@ def plan_games(parsed, existing):
     return rows, news
 
 
+# ---------------------------------------------------------------- Superliga uzivo (Genius Sports LiveStats)
+GS_DATA = "https://fibalivestats.dcd.shared.geniussports.com/data/%s/data.json"
+
+
+def parse_live(js):
+    """Cita podatke LiveStats-a. Vraca None ako oblik nije prepoznat."""
+    tm = (js or {}).get("tm") or {}
+    t1, t2 = tm.get("1"), tm.get("2")
+    if not isinstance(t1, dict) or not isinstance(t2, dict):
+        return None
+
+    def sc(t):
+        for k in ("score", "tot_sPoints"):
+            v = t.get(k)
+            if v not in (None, ""):
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    s1, s2 = sc(t1), sc(t2)
+    if s1 is None or s2 is None:
+        return None
+    try:
+        period = int(js.get("period") or 0)
+    except (TypeError, ValueError):
+        period = 0
+    return {"n1": str(t1.get("name") or t1.get("shortName") or ""),
+            "n2": str(t2.get("name") or t2.get("shortName") or ""),
+            "s1": s1, "s2": s2, "period": period, "clock": str(js.get("clock") or "")}
+
+
+def live_updates(parsed, existing, probe=False, now=None):
+    """Za utakmice koje traju sad: status LIVE i rezultat uzivo; kad je kraj, FINAL."""
+    now = now or datetime.now(timezone.utc)
+    by_key = {(e["home"], e["away"], e.get("round") or 0): e for e in existing}
+    rows, news = [], []
+    for g in parsed:
+        if not g.get("ext_id") or g["status"] == "final":
+            continue
+        start = datetime.strptime(g["starts_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if not (start - timedelta(minutes=10) <= now <= start + timedelta(hours=3, minutes=30)):
+            continue
+        old = by_key.get((g["home"], g["away"], g["round"]))
+        if old and old["status"] == "final":
+            continue
+        try:
+            raw = fetch(GS_DATA % g["ext_id"])
+            if probe:
+                print("=== LIVESTATS PROBA %s (prvih 600 znakova) ===" % g["ext_id"])
+                print(raw[:600])
+            d = parse_live(json.loads(raw))
+        except Exception as e:
+            print("UPOZORENJE: LiveStats za %s nije dostupan: %s" % (g["ext_id"], e), file=sys.stderr)
+            continue
+        if not d:
+            print("UPOZORENJE: LiveStats za %s ima nepoznat oblik" % g["ext_id"], file=sys.stderr)
+            continue
+        if d["s1"] + d["s2"] == 0 and d["period"] == 0:
+            continue                                  # jos nije pocela
+        hs, as_ = d["s1"], d["s2"]
+        if slug(d["n1"]) and slug(d["n1"]) in slug(g["away"]) and slug(d["n2"]) in slug(g["home"]):
+            hs, as_ = as_, hs                         # ekipe zamenjene
+        finished = d["period"] >= 4 and d["clock"] in ("00:00", "0:00") and hs != as_
+        status = "final" if finished else "live"
+        gid = old["id"] if old else ("ks-" + g["ext_id"])
+        if old and old["status"] == status and old.get("home_score") == hs and old.get("away_score") == as_:
+            continue
+        rows.append({"id": gid, "league": "superliga", "status": status, "home": g["home"], "away": g["away"],
+                     "home_score": hs, "away_score": as_, "starts_at": g["starts_at"],
+                     "venue": g["venue"], "round": g["round"], "tba": False})
+        print("LIVE %s %s %d:%d %s %s" % (status, g["home"], hs, as_, g["away"], "Q%d %s" % (d["period"], d["clock"])))
+        if status == "final":
+            hw = hs > as_
+            w, l = (g["home"], g["away"]) if hw else (g["away"], g["home"])
+            ws, ls = (hs, as_) if hw else (as_, hs)
+            body = "%s e fitoi ndeshjen e javës së %d-të të Superligës së Kosovës ndaj %s me rezultat %d:%d%s." % (
+                w, g["round"], l, ws, ls, (", në " + g["venue"]) if g["venue"] else "")
+            news.append({"id": "result-" + gid, "league": "superliga", "auto": True, "breaking": False,
+                         "title": "%s fiton %d:%d ndaj %s" % (w, ws, ls, l), "body": body,
+                         "src": "basketbolli.com", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    return rows, news
+
+
 # ---------------------------------------------------------------- Supabase
 class Supa:
     def __init__(self, url, key):
@@ -192,6 +277,16 @@ def sync_kosovo(args, db):
                            "Nista nije upisano." % (len(games), len(standings)))
     existing = norm_existing(db.get("games?league=eq.superliga&select=*&limit=2000") if db else [])
     rows, news = plan_games(games, existing)
+    try:
+        lrows, lnews = live_updates(games, existing, probe=args.probe)
+    except Exception as e:
+        print("UPOZORENJE: uzivo nije obradjeno: %s" % e, file=sys.stderr)
+        lrows, lnews = [], []
+    if lrows:
+        ids = {r["id"] for r in lrows}
+        rows = [r for r in rows if r["id"] not in ids] + lrows
+        nids = {n["id"] for n in lnews}
+        news = [n for n in news if n["id"] not in nids] + lnews
     print("Superliga: %d utakmica na sajtu, %d za upis, %d vesti, %d redova tabele" %
           (len(games), len(rows), len(news), len(standings)))
     if args.dry_run or not db:
