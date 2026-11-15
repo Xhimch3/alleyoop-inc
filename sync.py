@@ -214,7 +214,7 @@ EL_TZ = ZoneInfo("Europe/Berlin")                     # satnica Evrolige je sred
 EL_TEAMS = [
     ("PARTIZAN", "Partizan"), ("BASKONIA", "Baskonia"), ("PARIS", "Paris Basketball"),
     ("FENERBAHCE", "Fenerbahçe"), ("MACCABI", "Maccabi Tel Aviv"), ("HAPOEL", "Hapoel Tel Aviv"),
-    ("OLYMPIACOS", "Olympiacos"), ("DUBAI", "Dubai Basketball"), ("MILANO", "Olimpia Milano"),
+    ("OLYMPIACOS", "Olympiacos"), ("DUBAI", "Dubai Basketball"), ("MILAN", "Olimpia Milano"),
     ("ZALGIRIS", "Žalgiris Kaunas"), ("VALENCIA", "Valencia Basket"), ("BAYERN", "FC Bayern"),
     ("REAL MADRID", "Real Madrid"), ("ZVEZDA", "Crvena Zvezda"), ("EFES", "Anadolu Efes"),
     ("VIRTUS", "Virtus Bologna"), ("PANATHINAIKOS", "Panathinaikos"), ("BARCELONA", "FC Barcelona"),
@@ -228,7 +228,7 @@ def el_team(raw):
     for key, name in EL_TEAMS:
         if key in s:
             return name
-    raise RuntimeError("Nepoznat naziv ekipe iz API-ja Evrolige: %r (dodaj ga u EL_TEAMS)" % raw)
+    return None
 
 
 def el_start(date_s, time_s):
@@ -251,21 +251,31 @@ def el_start(date_s, time_s):
 def parse_el_schedule(xml_text):
     import xml.etree.ElementTree as ET
     root = ET.fromstring(xml_text)
-    out = []
+    out, unknown = [], set()
     for it in root.iter("item"):
         g = {c.tag.lower(): (c.text or "").strip() for c in it}
         if not g.get("hometeam") or not g.get("awayteam"):
             continue
+        home, away = el_team(g["hometeam"]), el_team(g["awayteam"])
+        if home is None:
+            unknown.add(g["hometeam"])
+        if away is None:
+            unknown.add(g["awayteam"])
+        if home is None or away is None:
+            continue
         played = g.get("played", "").lower() == "true"
         hs, as_ = to_int(g.get("homescore")), to_int(g.get("awayscore"))
         out.append({
-            "home": el_team(g["hometeam"]), "away": el_team(g["awayteam"]),
+            "home": home, "away": away,
             "round": to_int(g.get("gamenumber") or g.get("round")) or 0,
             "starts_at": el_start(g.get("date"), g.get("startime") or g.get("time")),
             "venue": g.get("arenaname", ""), "played": played,
             "home_score": hs if played else None, "away_score": as_ if played else None,
             "code": g.get("gamecode", ""),
         })
+    if unknown:
+        raise RuntimeError("Nepoznati nazivi ekipa iz API-ja Evrolige: %s (dodaj ih u EL_TEAMS)" %
+                           ", ".join(sorted(unknown)))
     return out
 
 
