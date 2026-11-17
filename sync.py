@@ -2,8 +2,8 @@
 """
 Alleyoop: automatska sinhronizacija rezultata u Supabase.
 
-Superliga e Kosovës: cita https://www.basketbolli.com/Results?leagueId=150 i rezultate uzivo (LiveStats).
-Evroliga: https://api-live.euroleague.net/v1/schedules i /v1/results (neslužbeni javni API, bez ključa).
+Superliga e Kosovës: cita https://www.basketbolli.com/Results?leagueId=150
+Evroliga: https://api-live.euroleague.net/v1/schedules (neslužbeni javni API, bez ključa).
 
 Koristi se ovako:
   python sync.py                       # jedan prolaz
@@ -44,7 +44,7 @@ def roman(s):
 
 
 def to_int(t):
-    t = (t or "").strip().replace("−", "-")
+    t = str(t if t is not None else "").strip().replace("−", "-")
     return int(t) if re.fullmatch(r"-?\d+", t) else None
 
 
@@ -407,6 +407,51 @@ def parse_el_results(xml_text):
     return out
 
 
+EL_HEADER = "https://live.euroleague.net/api/Header?gamecode=%s&seasoncode=" + EL_SEASON
+EL_BOX = "https://live.euroleague.net/api/Boxscore?gamecode=%s&seasoncode=" + EL_SEASON
+
+
+def _jget(d, *names):
+    """Vrati prvu vrednost kljuca (bez obzira na velika/mala slova)."""
+    low = {str(k).lower(): v for k, v in d.items()}
+    for n in names:
+        if n.lower() in low and low[n.lower()] not in (None, ""):
+            return low[n.lower()]
+    return None
+
+
+def el_live(code, probe=False):
+    """Zivi rezultat Evrolige (nezvanicni live API). Vraca {'live','hs','as'} ili None."""
+    m = re.search(r"(\d+)\s*$", code or "")
+    if not m:
+        return None
+    n = m.group(1)
+    for url in (EL_HEADER % n, EL_BOX % n):
+        try:
+            raw = fetch(url)
+            if probe:
+                print("=== EVROLIGA LIVE PROBA %s ===\n%s" % (url, raw[:700]))
+            d = json.loads(raw)
+            hs = to_int(_jget(d, "ScoreA", "HomeScore"))
+            as_ = to_int(_jget(d, "ScoreB", "AwayScore"))
+            if hs is None or as_ is None:                     # Boxscore: zbir poena iz statistike timova
+                tot = []
+                for t in (d.get("Stats") or []):
+                    tr = t.get("totr") or t.get("Totr") or {}
+                    tot.append(to_int(_jget(tr, "Points")))
+                if len(tot) == 2 and None not in tot:
+                    hs, as_ = tot
+            if hs is None or as_ is None:
+                continue
+            live = _jget(d, "Live")
+            live = live if isinstance(live, bool) else str(live).lower() == "true"
+            return {"live": live, "hs": hs, "as": as_}
+        except Exception as e:
+            print("UPOZORENJE: live Evroliga %s: %s" % (url, e), file=sys.stderr)
+    return None
+
+
+
 def sync_euroleague(args, db):
     if args.file:                         # --file se odnosi samo na Superligu
         return
@@ -429,6 +474,25 @@ def sync_euroleague(args, db):
         sc = scores.get((g["home"], g["away"]))
         g["played"] = sc is not None          # zavrsena samo ako imamo pravi rezultat
         g["home_score"], g["away_score"] = sc if sc else (None, None)
+    now0 = datetime.now(timezone.utc)
+    probed = False
+    for g in games:                       # zivi rezultat samo za utakmice koje sad traju
+        st = datetime.strptime(g["starts_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        g["live"] = False
+        if not (st - timedelta(minutes=10) <= now0 <= st + timedelta(hours=3, minutes=30)):
+            continue
+        try:
+            lv = el_live(g.get("code"), probe=args.probe and not probed)
+            probed = True
+        except Exception as e:
+            print("UPOZORENJE: live Evroliga: %s" % e, file=sys.stderr)
+            lv = None
+        if lv and lv["hs"] + lv["as"] > 0:
+            g["home_score"], g["away_score"] = lv["hs"], lv["as"]
+            g["played"] = not lv["live"]      # kad API kaze da vise nije live, utakmica je zavrsena
+            g["live"] = lv["live"]
+            print("Evroliga LIVE: %s %d:%d %s (%s)" % (g["home"], lv["hs"], lv["as"], g["away"],
+                                                      "uzivo" if lv["live"] else "zavrsena"))
     if len(games) < 100:
         raise RuntimeError("API Evrolige vratio %d utakmica (ocekivano oko 306). Nista nije upisano." % len(games))
     existing = norm_existing(db.get("games?league=eq.euroleague&select=*&limit=2000") if db else [])
@@ -438,7 +502,7 @@ def sync_euroleague(args, db):
     for g in games:
         old = by_key.get((g["home"], g["away"]))
         start = datetime.strptime(g["starts_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        status = "final" if g["played"] else "sched"
+        status = "live" if g.get("live") else ("final" if g["played"] else "sched")
         if old and old["status"] == "live" and status == "sched":
             status = "live"               # urednik je rucno stavio LIVE, ne vracaj
         if old and old["status"] == "final" and status == "sched" and old.get("home_score") is not None:
