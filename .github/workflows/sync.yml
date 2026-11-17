@@ -2,17 +2,17 @@ name: Sync rezultata
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/20 * * * *"
   workflow_dispatch:
 
 concurrency:
   group: sync
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 58
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,4 +27,4 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python sync.py --loop 240 --every 40
+        run: python sync.py --loop 3300 --every 40
