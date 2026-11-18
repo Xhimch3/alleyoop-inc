@@ -5,6 +5,8 @@ on:
     - cron: "*/20 * * * *"
   workflow_dispatch:
 
+# Novo pokretanje zamenjuje staro (staro je vec upisalo sve sto je imalo),
+# pa sync radi skoro neprekidno cak i kad GitHub preskoci neka zakazivanja.
 concurrency:
   group: sync
   cancel-in-progress: true
@@ -27,4 +29,4 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python sync.py --loop 3300 --every 40
+        run: python sync.py --loop 3300 --every 10
