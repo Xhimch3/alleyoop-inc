@@ -263,14 +263,24 @@ def norm_existing(rows):
     return rows
 
 
-def fetch(url):
+_CACHE = {}
+
+
+def fetch(url, ttl=0):
+    """ttl>0: ponovo koristi odgovor do ttl sekundi (da ne opterecujemo sajtove kad radimo cesto)."""
+    hit = _CACHE.get(url)
+    if ttl and hit and time.time() - hit[0] < ttl:
+        return hit[1]
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "sq,en;q=0.8"})
     with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", errors="replace")
+        txt = r.read().decode("utf-8", errors="replace")
+    if ttl:
+        _CACHE[url] = (time.time(), txt)
+    return txt
 
 
 def sync_kosovo(args, db):
-    html = open(args.file, encoding="utf-8", errors="replace").read() if args.file else fetch(FBK_URL)
+    html = open(args.file, encoding="utf-8", errors="replace").read() if args.file else fetch(FBK_URL, ttl=60)
     games, standings = parse_fbk(html)
     if len(games) < 4 or len(standings) < 4:
         raise RuntimeError("Stranica FBK izgleda drugacije nego pre (nadjeno %d utakmica, %d redova tabele). "
@@ -455,13 +465,13 @@ def el_live(code, probe=False):
 def sync_euroleague(args, db):
     if args.file:                         # --file se odnosi samo na Superligu
         return
-    xml_text = fetch(EL_SCHEDULE)
+    xml_text = fetch(EL_SCHEDULE, ttl=60)
     if args.probe:
         print("=== EVROLIGA PROBA (prvih 1500 znakova odgovora) ===")
         print(xml_text[:1500])
     games = parse_el_schedule(xml_text)
     try:
-        res_xml = fetch(EL_RESULTS)
+        res_xml = fetch(EL_RESULTS, ttl=60)
         if args.probe:
             print("=== EVROLIGA REZULTATI PROBA (prvih 800 znakova) ===")
             print(res_xml[:800])
