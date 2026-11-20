@@ -455,7 +455,16 @@ def el_live(code, probe=False):
                 continue
             live = _jget(d, "Live")
             live = live if isinstance(live, bool) else str(live).lower() == "true"
-            return {"live": live, "hs": hs, "as": as_}
+            clock = None
+            try:
+                q = to_int(_jget(d, "Quarter"))
+                rem = str(_jget(d, "RemainingPartialTime") or "").strip()
+                if live and q:
+                    qs = ("Q%d" % q) if q <= 4 else ("OT" if q == 5 else "OT%d" % (q - 4))
+                    clock = qs + ((" · " + rem) if re.match(r"^\d{1,2}:\d{2}$", rem) else "")
+            except Exception:
+                clock = None
+            return {"live": live, "hs": hs, "as": as_, "clock": clock}
         except Exception as e:
             print("UPOZORENJE: live Evroliga %s: %s" % (url, e), file=sys.stderr)
     return None
@@ -501,6 +510,7 @@ def sync_euroleague(args, db):
             g["home_score"], g["away_score"] = lv["hs"], lv["as"]
             g["played"] = not lv["live"]      # kad API kaze da vise nije live, utakmica je zavrsena
             g["live"] = lv["live"]
+            g["clock"] = lv.get("clock")
             print("Evroliga LIVE: %s %d:%d %s (%s)" % (g["home"], lv["hs"], lv["as"], g["away"],
                                                       "uzivo" if lv["live"] else "zavrsena"))
     if len(games) < 100:
@@ -520,8 +530,10 @@ def sync_euroleague(args, db):
         gid = old["id"] if old else "eu-%s-%s-%s" % (slug(g["home"]), slug(g["away"]), g["starts_at"][:10])
         row = {"id": gid, "league": "euroleague", "status": status, "home": g["home"], "away": g["away"],
                "home_score": g["home_score"], "away_score": g["away_score"], "starts_at": g["starts_at"],
-               "venue": g["venue"], "round": g["round"], "tba": False}
+               "venue": g["venue"], "round": g["round"], "tba": False,
+               "clock": g.get("clock") if status == "live" else None}
         if old and old["status"] == status and old.get("home_score") == row["home_score"] \
+                and (old.get("clock") or None) == row["clock"] \
                 and old.get("away_score") == row["away_score"] and old.get("starts_at_norm") == row["starts_at"] \
                 and old.get("round") == row["round"]:
             continue
@@ -544,7 +556,15 @@ def sync_euroleague(args, db):
         for n in news:
             print("  VEST", n["title"])
         return
-    db.upsert("games", rows, "id")
+    try:
+        db.upsert("games", rows, "id")
+    except Exception as e:
+        if "clock" not in str(e):
+            raise
+        print("UPOZORENJE: kolona 'clock' ne postoji u bazi, upisujem bez nje.", file=sys.stderr)
+        for r in rows:
+            r.pop("clock", None)
+        db.upsert("games", rows, "id")
     db.upsert("news", news, "id")
     db.upsert("standings", standings, "league,team")
 
