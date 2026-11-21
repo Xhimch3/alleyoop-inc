@@ -175,6 +175,16 @@ def parse_live(js):
             "s1": s1, "s2": s2, "period": period, "clock": str(js.get("clock") or "")}
 
 
+def ks_clock(period, clock):
+    """Tekst za prikaz: 'Q3 · 04:46' (ili 'OT · 02:10'). Prazno ako nema podataka."""
+    if not period:
+        return None
+    qs = ("Q%d" % period) if period <= 4 else ("OT" if period == 5 else "OT%d" % (period - 4))
+    c = str(clock or "").strip()
+    m = re.match(r"^(?:\d{1,2}:)?(\d{1,2}:\d{2})(?:\.\d+)?$", c)
+    return qs + ((" · " + m.group(1)) if m else "")
+
+
 def live_updates(parsed, existing, probe=False, now=None):
     """Za utakmice koje traju sad: status LIVE i rezultat uzivo; kad je kraj, FINAL."""
     now = now or datetime.now(timezone.utc)
@@ -209,11 +219,13 @@ def live_updates(parsed, existing, probe=False, now=None):
         finished = d["period"] >= 4 and d["clock"] in ("00:00", "0:00") and hs != as_
         status = "final" if finished else "live"
         gid = old["id"] if old else ("ks-" + g["ext_id"])
-        if old and old["status"] == status and old.get("home_score") == hs and old.get("away_score") == as_:
+        clk = ks_clock(d["period"], d["clock"]) if status == "live" else None
+        if old and old["status"] == status and old.get("home_score") == hs and old.get("away_score") == as_ \
+                and (old.get("clock") or None) == clk:
             continue
         rows.append({"id": gid, "league": "superliga", "status": status, "home": g["home"], "away": g["away"],
                      "home_score": hs, "away_score": as_, "starts_at": g["starts_at"],
-                     "venue": g["venue"], "round": g["round"], "tba": False})
+                     "venue": g["venue"], "round": g["round"], "tba": False, "clock": clk})
         print("LIVE %s %s %d:%d %s %s" % (status, g["home"], hs, as_, g["away"], "Q%d %s" % (d["period"], d["clock"])))
         if status == "final":
             hw = hs > as_
